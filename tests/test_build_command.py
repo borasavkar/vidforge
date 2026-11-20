@@ -1437,3 +1437,59 @@ def test_remux_sub_plan_atlanan_iz_indeksi_kaydirir():
 def test_resim_tabanli_izler_mp4de_atlanir_mkvde_kopyalanir(codec):
     assert nv.gomulu_sub_codec(codec, "mp4") is None
     assert nv.gomulu_sub_codec(codec, "mkv") == "copy"
+
+
+# ------------------------------------------------- konusma gurultusu (arnndn)
+MODEL = r"C:\Program Files\VidForge\_internal\modeller\std.rnnn"
+
+
+def test_gurultu_temizleme_kapaliyken_ses_filtresi_yok():
+    cmd, _ = nv.build_command(cfg(), probes())
+    assert "-af" not in cmd
+    assert not any("arnndn" in str(p) for p in cmd)
+
+
+def test_gurultu_temizleme_acikken_arnndn_eklenir():
+    cmd, notes = nv.build_command(cfg(ses_temizle=True, rnn_model=MODEL), probes())
+    af = val_of(cmd, "-af")
+    assert af.startswith("arnndn=m=")
+    # yol filtre grafigine kacislanarak gomulmeli (Windows ':' ve '\')
+    assert af == "arnndn=m=" + nv.escape_filter_path(MODEL)
+    assert any("gürültüsü temizleniyor" in n for n in notes)
+
+
+def test_gurultu_temizleme_kopyalamayi_iptal_eder():
+    """Kopyalanan ses filtrelenemez: 'Kopyala' secili olsa da yeniden kodlanmali."""
+    cmd, notes = nv.build_command(
+        cfg(copy_audio=True, ses_temizle=True, rnn_model=MODEL),
+        probes(audio_copy_ok=True, audio_bitrate=128))
+    assert val_of(cmd, "-c:a") == "libopus"
+    assert val_of(cmd, "-b:a") == "128k"      # 192k yedegi kaynagi asmaz
+    assert "-af" in cmd
+    assert any("kopyalanamaz" in n for n in notes)
+
+
+def test_gurultu_temizleme_mp4te_aac_ile_calisir():
+    cmd, _ = nv.build_command(
+        cfg(container="mp4", codec_a="aac", ses_temizle=True, rnn_model=MODEL,
+            output_file=r"C:\video\cikti.mp4"), probes())
+    assert val_of(cmd, "-c:a") == "aac" and "-af" in cmd
+
+
+def test_gurultu_temizleme_amd_sekmesinde_de_calisir():
+    cmd, _ = nv.build_command(amd_cfg(ses_temizle=True, rnn_model=MODEL), probes())
+    assert "arnndn" in val_of(cmd, "-af")
+
+
+def test_model_yoksa_is_bozulmaz_uyari_verilir():
+    cmd, notes = nv.build_command(cfg(ses_temizle=True, rnn_model=None), probes())
+    assert "-af" not in cmd
+    assert any("bulunamadı" in n for n in notes)
+
+
+def test_model_dosyasi_depoda_var():
+    """Paketlenecek model gercekten depoda olmali; yoksa exe'de salter bos calisir."""
+    yol = nv.rnn_model_yolu()
+    assert yol and os.path.getsize(yol) > 100_000
+    with open(yol, encoding="ascii") as fh:
+        assert fh.readline().startswith("rnnoise-nu model file")

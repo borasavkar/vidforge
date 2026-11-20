@@ -790,6 +790,38 @@ def ses_bitrate_sinirla(secilen, kaynak_kbps):
             "sadece dosyayı büyütür.")
 
 
+# ---------------------------------------------------------------------------
+# KONUSMA GURULTUSU TEMIZLEME (arnndn = RNNoise, yapay sinir agi)
+# ---------------------------------------------------------------------------
+# Model: Xiph RNNoise'in orijinal agirliklari (std.rnnn, BSD-3; bkz.
+# modeller/LISANS-rnnoise.txt), richardpl/arnndn-models deposundan.
+#
+# OLCULDU (2026-11-20, ffmpeg 9.1): temiz konusmaya bilinen gurultu eklenip
+# SI-SDR (temiz konusmaya benzerlik) olculdu:
+#     hisirti / fan / 50 Hz ugultu, 0 dB   ->  +10 .. +15 dB iyilesme
+#     ayni gurultuler, 10 dB                ->  +6 .. +8 dB
+#     arka planda MUZIK                     ->  -1 .. +6 dB (zayif)
+#     ortalama: std +8.1 dB | sh +4.6 dB (bazen KOTULESTIRIYOR) | std mix=0.7 +6.3
+# Temiz konusmaya zarari kucuk (SI-SDR 19-21 dB) AMA MUZIGI BOZUYOR: muzik
+# parcasinda enerji 7.3 dB dustu (sesin bir kismini gurultu sanip siliyor).
+# Bu yuzden varsayilan KAPALI ve aciklamada uyariliyor. Hiz sorun degil
+# (~240x gercek zaman).
+RNN_MODEL = os.path.join("modeller", "std.rnnn")
+
+
+def rnn_model_yolu():
+    """Paketteki RNNoise model dosyasinin tam yolu; bulunamazsa None."""
+    if getattr(sys, "frozen", False):
+        kokler = [getattr(sys, "_MEIPASS", ""), os.path.dirname(sys.executable)]
+    else:
+        kokler = [os.path.dirname(os.path.abspath(__file__))]
+    for kok in kokler:
+        yol = os.path.join(kok, RNN_MODEL)
+        if kok and os.path.isfile(yol):
+            return yol
+    return None
+
+
 def cozunurluk_bandi(w, h):
     """
     Bir kareye EN YAKIN CQ tablosu satirini secer ("4K", "1080p", ...).
@@ -1337,7 +1369,23 @@ def build_command(cfg, probes):
 
     # ---------- SES ----------
     codec_a = cfg["codec_a"]
-    if cfg["copy_audio"]:
+    # Gurultu temizleme sesi DEGISTIRIR; kopyalanan ses filtrelenemez. Model
+    # bulunamazsa is bozulmasin diye temizleme atlanir ve kullaniciya soylenir.
+    ses_temizle = bool(cfg.get("ses_temizle"))
+    rnn_model = cfg.get("rnn_model") if ses_temizle else None
+    if ses_temizle and not rnn_model:
+        ses_temizle = False
+        notes.append("⚠️ Gürültü temizleme modeli (modeller/std.rnnn) bulunamadı; "
+                     "ses temizlenmeden işleniyor.")
+    if cfg["copy_audio"] and ses_temizle:
+        # "Kopyala" secili ama ses filtreleneceği icin yeniden kodlanmak
+        # ZORUNDA. Kaynak kalitesine yakin kalmak icin kopyalama yedeginin
+        # kuralini kullan: 192k, kaynagin ustune cikmadan.
+        yedek_bitrate, _ = ses_bitrate_sinirla("192k", probes.get("audio_bitrate"))
+        cmd.extend(["-c:a", codec_a, "-b:a", yedek_bitrate])
+        notes.append(f"🎙️ Gürültü temizleme açık: ses kopyalanamaz, "
+                     f"{codec_a} {yedek_bitrate} ile yeniden kodlanacak.")
+    elif cfg["copy_audio"]:
         if probes.get("audio_copy_ok"):
             cmd.extend(["-c:a", "copy"])
             notes.append("🎵 Ses yeniden kodlanmadan kopyalanıyor (kalite kaybı yok).")
@@ -1358,6 +1406,10 @@ def build_command(cfg, probes):
         cmd.extend(["-c:a", codec_a, "-b:a", a_bitrate])
         if ses_notu:
             notes.append(ses_notu)
+    if ses_temizle:
+        cmd.extend(["-af", f"arnndn=m={escape_filter_path(rnn_model)}"])
+        notes.append("🎙️ Konuşma gürültüsü temizleniyor (RNNoise). Müzikli "
+                     "videolarda müziği bozabilir.")
 
     # RENK ETIKETI - IKINCI KATMAN. Asil is setparams filtresinde yapiliyor
     # (bkz. build_filters). Filtre zinciri herhangi bir yolda atlanirsa cikti
@@ -2188,8 +2240,16 @@ class FFmpegStudioPro(ctk.CTk, _DndBase):
         card = self.create_card(parent, "🎵 Ses Kalitesi")
         card.pack(fill="x", pady=pady)
         ReadOnlyComboBox(card, variable=tab_vars["audio_bitrate"],
-                         values=self.AUDIO_VALUES).pack(anchor="w", padx=15, pady=(0, 15))
+                         values=self.AUDIO_VALUES).pack(anchor="w", padx=15, pady=(0, 6))
+        self._add_ses_temizle(card, tab_vars)
         return card
+
+    def _add_ses_temizle(self, card, tab_vars):
+        """Konusma gurultusu temizleme salteri (bkz. RNN_MODEL notu). Varsayilan KAPALI."""
+        tab_vars.setdefault("ses_temizle", ctk.BooleanVar(value=False))
+        self._add_toggle(card, "🎙️ Konuşma gürültüsünü temizle", tab_vars["ses_temizle"],
+                         "Fan, uğultu, hışırtıyı siler. Müzikli videoda kullanmayın.",
+                         son=True)
 
     def _create_nvenc_card(self, parent, tab_vars, title, on_cq_change):
         """Preset + CQ slider karti. (lbl_title, lbl_status, slider) dondurur."""
@@ -2515,7 +2575,8 @@ class FFmpegStudioPro(ctk.CTk, _DndBase):
         card_format.pack(fill="x", pady=(0, 10))
         ReadOnlyComboBox(card_format, variable=tab_vars["container"], values=["webm", "mkv"]).pack(anchor="w", padx=15, pady=(0, 5))
         ctk.CTkLabel(card_format, text="* VP9 için WebM standarttır (Audio: Opus)", font=("Arial", 10, "italic"), text_color="gray").pack(anchor="w", padx=15, pady=(0, 5))
-        ReadOnlyComboBox(card_format, variable=tab_vars["audio_bitrate"], values=self.VP9_AUDIO_VALUES).pack(anchor="w", padx=15, pady=(5, 15))
+        ReadOnlyComboBox(card_format, variable=tab_vars["audio_bitrate"], values=self.VP9_AUDIO_VALUES).pack(anchor="w", padx=15, pady=(5, 6))
+        self._add_ses_temizle(card_format, tab_vars)
 
         card_vp9 = self.create_card(col_left, "🧠 VP9 İşlemci Motoru (CPU)")
         card_vp9.pack(fill="x", pady=10)
@@ -4136,6 +4197,8 @@ class FFmpegStudioPro(ctk.CTk, _DndBase):
             "amf_sr_algo": AMF_SR_ALGORITMALARI.get(oku("amf_sr_algo", ""), AMF_SR_VARSAYILAN_ALGO),
             "amf_frc": tab_vars["amf_frc"].get() if "amf_frc" in tab_vars else False,
             "amf_bf": tab_vars["amf_bf"].get() if "amf_bf" in tab_vars else False,
+            "ses_temizle": tab_vars["ses_temizle"].get() if "ses_temizle" in tab_vars else False,
+            "rnn_model": rnn_model_yolu(),
             "output_dir": self.output_dir.get().strip(),
             "name_with_cq": self.name_with_cq.get(),
             "trim_start": self.trim_start.get(),
@@ -4491,7 +4554,7 @@ class FFmpegStudioPro(ctk.CTk, _DndBase):
             f"Olcek        : {cfg.get('scale')}    Cikacak kare: {cfg.get('cikti_boyutu')}",
             f"Cozucu       : hwaccel={cfg.get('hwaccel') or '-'}  tam_gpu={bool(cfg.get('tam_gpu'))}",
             f"Konteyner    : {cfg.get('container')}    10-bit: {cfg.get('ten_bit')}",
-            f"Ses          : {cfg.get('codec_a')}  bitrate={cfg.get('a_bitrate')}  kopyala={cfg.get('copy_audio')}",
+            f"Ses          : {cfg.get('codec_a')}  bitrate={cfg.get('a_bitrate')}  kopyala={cfg.get('copy_audio')}  gurultu_temizle={cfg.get('ses_temizle')}",
             f"Altyazi      : {cfg.get('sub_file') or '-'}",
             f"Kaynak       : {cfg.get('input_file')}",
             f"Cikti        : {cfg.get('output_file')}",

@@ -27,7 +27,11 @@ ONEDIR = True
 FFMPEG_DIR = os.path.join(os.environ.get('USERPROFILE', ''),
                           'scoop', 'apps', 'ffmpeg', 'current', 'bin')
 
-datas = [('icon.ico', '.')]
+# modeller/: konusma gurultusu temizleme modeli (RNNoise, bkz. RNN_MODEL).
+# Paketlenmezse salter calisir ama temizleme atlanir ve logda uyari cikar.
+datas = [('icon.ico', '.'),
+         ('modeller/std.rnnn', 'modeller'),
+         ('modeller/LISANS-rnnoise.txt', 'modeller')]
 binaries = []
 hiddenimports = []
 
